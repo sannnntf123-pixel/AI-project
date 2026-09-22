@@ -6,8 +6,12 @@ backend, and then does a real end-to-end load-and-generate with GPT-2 plus a
 LoRA wrap, because "the import worked" and "the model runs" are different
 claims.
 
-Run:  python -m src.test_setup
-      python -m src.test_setup --tiny    # fast: skips the 548MB GPT-2 download
+Which model it tests follows the profile in config.py:
+    local (default on this Mac)  -> SFT.tiny_model, downloads in seconds
+    colab                        -> SFT.full_model, the real thing
+
+Run:  python -m src.test_setup            # whatever the profile says
+      python -m src.test_setup --full     # force the real model
       python -m src.test_setup --model distilgpt2
 """
 
@@ -18,7 +22,7 @@ import platform
 import sys
 import time
 
-from src.config import PATHS, SFT, format_prompt, get_device, get_dtype
+from src.config import PATHS, PROFILE, SFT, format_prompt, get_device, get_dtype
 
 # Minimum versions the rest of the pipeline assumes.
 REQUIRED = [
@@ -33,13 +37,6 @@ REQUIRED = [
     "sklearn",
     "gradio",
 ]
-
-# A miniature model with GPT-2's real architecture and tokenizer, but a tiny
-# hidden size. Downloads in seconds, and still exercises every code path the
-# real run uses -- including whether the LoRA target module name "c_attn" in
-# config.py actually matches this architecture. Use it to check the plumbing
-# when the network is slow; use the real model to check the model.
-TINY_MODEL = "sshleifer/tiny-gpt2"
 
 PASS = "  ok  "
 FAIL = " FAIL "
@@ -125,17 +122,23 @@ def check_generation(model_name: str) -> bool:
 
     # Wrap in LoRA exactly as the SFT stage will, to confirm the target module
     # names in config.py match this architecture.
+    # Resolve the target modules from the model actually being tested, which
+    # is the whole point of lora_targets_for(): --model qwen would otherwise
+    # attach adapters to GPT-2 module names and silently train nothing.
+    from src.config import lora_targets_for
+
+    targets = lora_targets_for(model_name)
     lora = LoraConfig(
         r=SFT.lora_r,
         lora_alpha=SFT.lora_alpha,
         lora_dropout=SFT.lora_dropout,
-        target_modules=list(SFT.lora_target_modules),
+        target_modules=list(targets),
         task_type="CAUSAL_LM",
     )
     peft_model = get_peft_model(model, lora)
     trainable = sum(p.numel() for p in peft_model.parameters() if p.requires_grad)
     total = sum(p.numel() for p in peft_model.parameters())
-    _line(PASS, "LoRA wrap", f"{trainable:,} / {total:,} trainable ({100*trainable/total:.2f}%)")
+    _line(PASS, "LoRA wrap", f"{targets} — {trainable:,} / {total:,} trainable ({100*trainable/total:.2f}%)")
 
     peft_model.to(device)
     peft_model.eval()
@@ -160,7 +163,7 @@ def check_generation(model_name: str) -> bool:
     print("  prompt :", repr(prompt))
     print("  output :", text.strip())
     print()
-    if model_name == TINY_MODEL:
+    if model_name == SFT.tiny_model:
         print("  (Output is gibberish by design: this is a randomly-initialised")
         print("   miniature model. It proves the code path works, nothing more.)")
     else:
@@ -172,9 +175,14 @@ def check_generation(model_name: str) -> bool:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="joke-rl environment check")
     parser.add_argument(
+        "--full",
+        action="store_true",
+        help=f"force the real model ({SFT.full_model}) instead of the profile default",
+    )
+    parser.add_argument(
         "--tiny",
         action="store_true",
-        help=f"use {TINY_MODEL} instead of {SFT.base_model} (fast, no large download)",
+        help=f"force the tiny model ({SFT.tiny_model})",
     )
     parser.add_argument(
         "--model",
@@ -186,14 +194,22 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    model_name = args.model or (TINY_MODEL if args.tiny else SFT.base_model)
+    if args.model:
+        model_name = args.model
+    elif args.full:
+        model_name = SFT.full_model
+    elif args.tiny:
+        model_name = SFT.tiny_model
+    else:
+        model_name = SFT.base_model
 
     print("=" * 72)
-    print("joke-rl environment check")
+    print(f"joke-rl environment check  [profile: {PROFILE}]")
     print("=" * 72)
 
     PATHS.ensure()
     _line(PASS, "project dirs", f"created under {PATHS.root}")
+    _line(PASS, "models dir", str(PATHS.models))
 
     results = {
         "python": check_python(),

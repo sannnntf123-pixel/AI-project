@@ -6,14 +6,70 @@ grouped into frozen dataclasses by pipeline stage (data -> SFT -> reward -> RL)
 so that related knobs stay together and nothing can be mutated by accident at
 run time.
 
+Two things are resolved at import time from the environment:
+
+  * PROFILE  -- "local" (tiny model, fast, runs on a MacBook) or "colab"
+                (real model, real training). Auto-detected, overridable.
+  * PATHS    -- every directory can be redirected with an env var, so the
+                Gradio app can load checkpoints straight from Google Drive.
+
 Usage:
-    from src.config import PATHS, SFT, REWARD, RL, get_device
+    from src.config import PATHS, SFT, REWARD, RL, get_device, PROFILE
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import os
+import sys
+from dataclasses import dataclass
 from pathlib import Path
+
+
+# --------------------------------------------------------------------------
+# Profile: local (tiny model) vs colab (real model)
+# --------------------------------------------------------------------------
+# The single switch that decides whether we are smoke-testing the code or
+# actually training. Everything else keys off this, so a script never needs to
+# know where it is running.
+#
+#   auto (default)  -> "colab" when running inside Google Colab, else "local"
+#   JOKE_RL_PROFILE=colab   force the real model (e.g. a rented GPU box)
+#   JOKE_RL_PROFILE=local   force the tiny model (e.g. debugging on Colab)
+
+VALID_PROFILES = ("local", "colab")
+
+
+def _detect_profile() -> str:
+    """Resolve the profile without importing torch.
+
+    We deliberately do not use `torch.cuda.is_available()` here: config is
+    imported by scripts that never touch a model, and importing torch costs
+    seconds. Colab announces itself through both a module and an env var.
+    """
+    override = os.environ.get("JOKE_RL_PROFILE", "").strip().lower()
+    if override:
+        if override not in VALID_PROFILES:
+            raise ValueError(
+                f"JOKE_RL_PROFILE={override!r} is not valid; "
+                f"expected one of {VALID_PROFILES}"
+            )
+        return override
+
+    in_colab = "google.colab" in sys.modules or "COLAB_RELEASE_TAG" in os.environ
+    return "colab" if in_colab else "local"
+
+
+PROFILE = _detect_profile()
+IS_COLAB = PROFILE == "colab"
+IS_LOCAL = PROFILE == "local"
+
+
+def _env_path(var: str) -> Path | None:
+    """Read a path from the environment, expanding ~ and $VARS."""
+    raw = os.environ.get(var, "").strip()
+    if not raw:
+        return None
+    return Path(os.path.expandvars(raw)).expanduser()
 
 
 # --------------------------------------------------------------------------
@@ -28,7 +84,13 @@ class Paths:
 
     @property
     def data(self) -> Path:
-        return self.root / "data"
+        """Dataset root. Override with JOKE_RL_DATA_DIR.
+
+        On Colab, point this at Drive so a disconnected runtime does not cost
+        you the cleaned dataset:
+            os.environ["JOKE_RL_DATA_DIR"] = "/content/drive/MyDrive/joke-rl/data"
+        """
+        return _env_path("JOKE_RL_DATA_DIR") or (self.root / "data")
 
     @property
     def raw(self) -> Path:
@@ -42,7 +104,16 @@ class Paths:
 
     @property
     def models(self) -> Path:
-        return self.root / "models"
+        """Checkpoint root. Override with JOKE_RL_MODELS_DIR.
+
+        This is the one that matters most. Colab runtimes are wiped when they
+        disconnect, so training writes to Drive:
+            os.environ["JOKE_RL_MODELS_DIR"] = "/content/drive/MyDrive/joke-rl/models"
+
+        The Gradio app reads the same variable, so pointing it at a synced
+        Drive folder locally is all it takes to demo a Colab-trained model.
+        """
+        return _env_path("JOKE_RL_MODELS_DIR") or (self.root / "models")
 
     @property
     def sft_model(self) -> Path:
@@ -74,6 +145,18 @@ class Paths:
         """Create every directory that scripts write into."""
         for p in (self.raw, self.processed, self.models, self.outputs, self.votes):
             p.mkdir(parents=True, exist_ok=True)
+
+    def describe(self) -> str:
+        """Human-readable summary, for printing at the top of a script or
+        notebook so it is obvious where output is going."""
+        rows = [
+            ("profile", PROFILE),
+            ("root", self.root),
+            ("data", self.data),
+            ("models", self.models),
+            ("outputs", self.outputs),
+        ]
+        return "\n".join(f"  {k:<10} {v}" for k, v in rows)
 
 
 PATHS = Paths()
@@ -145,13 +228,59 @@ DATA = DataConfig()
 # --------------------------------------------------------------------------
 # Stage 1 — Supervised fine-tuning (SFT) with LoRA
 # --------------------------------------------------------------------------
-# gpt2 (124M) is the safe default: it trains on a MacBook Air in minutes and on
-# a Colab T4 in well under an hour. Swap base_model for "Qwen/Qwen2.5-0.5B" on
-# Colab if you want noticeably better jokes; nothing else needs to change.
+# Two models, chosen by PROFILE:
+#
+#   local -> sshleifer/tiny-gpt2   2 layers, ~100K params, downloads in seconds.
+#            Its output is gibberish and always will be -- it is randomly
+#            initialised. That is fine: locally we are testing that the *code*
+#            runs, not that the model is good.
+#
+#   colab -> gpt2                  124M params, the real thing.
+#
+# Both share GPT-2's architecture and tokenizer, so a script that works on one
+# works on the other with no edits. Switch with JOKE_RL_PROFILE, or per-run
+# with JOKE_RL_BASE_MODEL=<any hf id>.
+
+# LoRA injects adapters into the attention projections, and those are named
+# differently per architecture. Getting this wrong is a silent failure: PEFT
+# attaches to nothing, training runs, loss barely moves, and nothing warns you.
+# So we resolve it from the model name rather than trusting a hardcoded value.
+LORA_TARGETS: dict[str, tuple[str, ...]] = {
+    "gpt2": ("c_attn",),                                   # fused qkv, a Conv1D
+    "gpt_neo": ("q_proj", "k_proj", "v_proj", "out_proj"),
+    "qwen": ("q_proj", "k_proj", "v_proj", "o_proj"),
+    "llama": ("q_proj", "k_proj", "v_proj", "o_proj"),
+    "opt": ("q_proj", "k_proj", "v_proj", "out_proj"),
+    "pythia": ("query_key_value",),
+}
+
+
+def lora_targets_for(model_name: str) -> tuple[str, ...]:
+    """Map a HF model id to its attention projection names.
+
+    Matches on substring, so "sshleifer/tiny-gpt2" and "distilgpt2" both
+    resolve to the gpt2 entry. Raises rather than guessing, because a wrong
+    guess here fails silently at training time.
+    """
+    key = model_name.lower()
+    for family, modules in LORA_TARGETS.items():
+        if family in key:
+            return modules
+    raise ValueError(
+        f"Unknown architecture for {model_name!r}: no LoRA target modules known.\n"
+        f"Add an entry to LORA_TARGETS in src/config.py. Known families: "
+        f"{', '.join(LORA_TARGETS)}.\n"
+        f"To find the right names: "
+        f"print([n for n, _ in model.named_modules()])"
+    )
+
 
 @dataclass(frozen=True)
 class SFTConfig:
-    base_model: str = "gpt2"
+    # The two ends of the switch.
+    tiny_model: str = "sshleifer/tiny-gpt2"
+    full_model: str = "gpt2"          # upgrade path on Colab: "Qwen/Qwen2.5-0.5B"
+
     max_length: int = 128
 
     # LoRA: instead of updating all 124M weights, we train small rank-r adapter
@@ -160,16 +289,6 @@ class SFTConfig:
     lora_r: int = 16
     lora_alpha: int = 32
     lora_dropout: float = 0.05
-    # Attention projection names differ per architecture:
-    #   gpt2  -> "c_attn" (fused qkv)
-    #   qwen2 -> "q_proj", "k_proj", "v_proj", "o_proj"
-    # If you switch base_model, this MUST change too or LoRA silently attaches
-    # to nothing.
-    lora_target_modules: tuple[str, ...] = ("c_attn",)
-    # GPT-2's c_attn is a Conv1D, whose weight matrix is stored transposed
-    # relative to nn.Linear. PEFT detects this and flips fan_in_fan_out itself
-    # (it prints a UserWarning saying so) -- the warning is expected on gpt2 and
-    # will not appear on Qwen, which uses real Linear layers.
 
     epochs: int = 3
     batch_size: int = 8
@@ -179,6 +298,47 @@ class SFTConfig:
     weight_decay: float = 0.01
     logging_steps: int = 25
     save_steps: int = 500
+
+    # Locally we only want to prove the training loop runs, so cap the dataset
+    # at a size that finishes in seconds. None means "use everything".
+    local_max_train_samples: int | None = 200
+    local_epochs: int = 1
+
+    @property
+    def base_model(self) -> str:
+        """The model this run actually uses.
+
+        Precedence: explicit env var > profile default. The env var exists so
+        you can test the real model locally (once it is downloaded) without
+        pretending to be Colab.
+        """
+        return os.environ.get("JOKE_RL_BASE_MODEL", "").strip() or (
+            self.full_model if IS_COLAB else self.tiny_model
+        )
+
+    @property
+    def lora_target_modules(self) -> tuple[str, ...]:
+        """Attention projections to adapt, derived from base_model.
+
+        Note for GPT-2: c_attn is a Conv1D whose weight is stored transposed
+        relative to nn.Linear. PEFT detects this and flips fan_in_fan_out
+        itself, printing a UserWarning -- expected on GPT-2, absent on Qwen.
+        """
+        return lora_targets_for(self.base_model)
+
+    @property
+    def effective_epochs(self) -> int:
+        return self.epochs if IS_COLAB else self.local_epochs
+
+    @property
+    def max_train_samples(self) -> int | None:
+        return None if IS_COLAB else self.local_max_train_samples
+
+    @property
+    def is_tiny(self) -> bool:
+        """True when the loaded model is the throwaway stand-in. Use this to
+        skip quality assertions that a random model cannot possibly pass."""
+        return self.base_model == self.tiny_model
 
 
 SFT = SFTConfig()
@@ -323,6 +483,16 @@ class AppConfig:
     temperature: float = 0.95
     top_p: float = 0.95
     max_new_tokens: int = 64
+
+    # Which checkpoint the demo serves. None means "best available", resolved
+    # by model_io.resolve_checkpoint() as dpo -> rl -> sft -> untrained base.
+    # Override with JOKE_RL_APP_MODEL for an exact path, or JOKE_RL_MODELS_DIR
+    # to point the whole project at a Drive folder.
+    model_stage: str | None = None
+
+    # Fold LoRA weights into the base model at load time: faster generation,
+    # and the app never trains, so there is no downside here.
+    merge_adapter: bool = True
 
 
 APP = AppConfig()

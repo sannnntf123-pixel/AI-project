@@ -111,6 +111,70 @@ backend, and does a real GPT-2 load-and-generate:
 python -m src.test_setup
 ```
 
+## Configuration
+
+Everything is driven by [`src/config.py`](src/config.py) plus a few environment
+variables. See [`.env.example`](.env.example).
+
+### Two profiles
+
+The same code runs a throwaway model locally and the real one on Colab:
+
+| Profile | Model | Purpose |
+|---|---|---|
+| `local` | `sshleifer/tiny-gpt2` (~100K params) | Prove the code runs. Output is gibberish — the model is randomly initialised. Downloads in seconds. |
+| `colab` | `gpt2` (124M) | Actual training. |
+
+The profile is auto-detected — `colab` inside Google Colab, `local` otherwise —
+so normally you set nothing. Override when you need to:
+
+```bash
+JOKE_RL_PROFILE=colab python -m src.test_setup     # force the real model
+JOKE_RL_BASE_MODEL=distilgpt2 python -m src.train  # one-off model override
+```
+
+Both models share GPT-2's architecture and tokenizer, so nothing else changes.
+LoRA target module names are resolved *from the model id* by
+`lora_targets_for()` rather than hardcoded — switching to `Qwen/Qwen2.5-0.5B`
+picks up `q_proj`/`k_proj`/`v_proj`/`o_proj` automatically. This matters because
+wrong target names are a silent failure: PEFT attaches to nothing, training
+runs, and the loss barely moves.
+
+Locally `SFT.effective_epochs` is 1 and `SFT.max_train_samples` is 200, so a
+training smoke test finishes in seconds instead of minutes.
+
+### Loading models from Google Drive
+
+Colab runtimes are recycled without warning, so training writes to Drive and
+the local app reads from it. One variable redirects both:
+
+```python
+# top of a Colab notebook
+from google.colab import drive; drive.mount('/content/drive')
+import os
+os.environ["JOKE_RL_MODELS_DIR"] = "/content/drive/MyDrive/joke-rl/models"
+```
+
+```bash
+# locally, against a synced Drive folder
+JOKE_RL_MODELS_DIR="$HOME/Google Drive/joke-rl/models" python -m app.demo
+```
+
+`model_io.load_policy()` then finds the best checkpoint on its own, preferring
+`dpo` → `rl` → `sft`, and falling back to the untrained base model so the app is
+runnable before any training exists:
+
+```python
+from src.model_io import load_policy
+model, tokenizer, info = load_policy()        # best available
+model, tokenizer, info = load_policy("sft")   # a specific stage
+print(info)   # "rl (LoRA adapter) on gpt2 — /content/drive/.../models/rl"
+```
+
+It handles LoRA adapters and full models, reads the base model out of
+`adapter_config.json` so you never have to remember it, and can merge adapters
+for faster inference.
+
 ## Layout
 
 ```

@@ -28,6 +28,42 @@ trained with **reinforcement learning**.
 - Heavy training happens on **Google Colab**, so training stages need
   **Colab-ready notebooks** in `notebooks/`, not just scripts.
 
+## Profiles and paths (important)
+
+**Never hardcode a model name or a path.** Both are resolved in `src/config.py`.
+
+`PROFILE` is `local` or `colab`, auto-detected (Colab is detected via
+`google.colab` in `sys.modules` or `COLAB_RELEASE_TAG`), overridable with
+`JOKE_RL_PROFILE`:
+
+- `local` -> `SFT.tiny_model` = `sshleifer/tiny-gpt2`. ~100K params, random
+  weights, gibberish output **by design**. Use it to test that code runs. Never
+  assert on output quality under this profile — check `SFT.is_tiny`.
+- `colab` -> `SFT.full_model` = `gpt2`. Real training.
+
+Always read `SFT.base_model` (a property), never `tiny_model`/`full_model`
+directly. Likewise use `SFT.lora_target_modules`, which calls
+`lora_targets_for(base_model)` — hardcoding `("c_attn",)` breaks the moment the
+base model changes, and it breaks *silently*.
+
+Locally, `SFT.effective_epochs` is 1 and `SFT.max_train_samples` is 200, so a
+training smoke test finishes in seconds.
+
+Environment variables (all optional, documented in `.env.example`):
+
+| Var | Effect |
+|---|---|
+| `JOKE_RL_PROFILE` | `local` / `colab` |
+| `JOKE_RL_BASE_MODEL` | override the model id for one run |
+| `JOKE_RL_MODELS_DIR` | move `PATHS.models` (e.g. to Drive) |
+| `JOKE_RL_DATA_DIR` | move `PATHS.data` |
+| `JOKE_RL_APP_MODEL` | serve one exact checkpoint in the app |
+
+Load and save checkpoints through `src/model_io.py` only:
+`load_policy(stage=None)` returns `(model, tokenizer, info)` and resolves
+`dpo -> rl -> sft -> untrained base`; `save_policy(model, tokenizer, stage)`
+writes under `PATHS.models`, which honours the Drive override.
+
 ## Environment
 - MacBook Air, Apple Silicon (arm64), macOS. Python 3.11.9, venv at `.venv/`.
 - MPS available; **no CUDA locally**.

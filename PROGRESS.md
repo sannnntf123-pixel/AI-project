@@ -16,16 +16,44 @@ Committed as `4f69ff33` and pushed to `origin/main`.
 |---|---|
 | `src/config.py` | Single source of truth. Frozen dataclasses per stage: `PATHS, DATA, SFT, REWARD, RL, DPO, EVAL, APP`. Helpers: `format_prompt()`, `format_example()`, `get_device()`, `get_dtype()`, `use_fp16()`. |
 | `src/test_setup.py` | Environment smoke test. `python -m src.test_setup` |
+| `src/model_io.py` | `load_policy()` / `save_policy()` / `resolve_checkpoint()`. Handles LoRA adapters and full models, searches `dpo -> rl -> sft`, falls back to the untrained base. |
+| `.env.example` | Every environment variable, documented. |
 | `.gitignore` | Excludes `.venv/`, `data/*`, `models/*`; keeps folders via `.gitkeep`. |
 | `README.md` | Project writeup with pipeline diagram. |
 | `CLAUDE.md` | Working context and constraints. |
 | `requirements.txt` | Direct deps. Full freeze in `requirements-lock.txt`. |
+
+### Profile system (added after the first commit)
+
+`PROFILE` is `local` or `colab`, auto-detected, and decides the model:
+
+- **local** → `sshleifer/tiny-gpt2`, ~100K params, gibberish output by design,
+  1 epoch, 200 training samples. For checking that code runs.
+- **colab** → `gpt2`, full training.
+
+LoRA target modules are derived from the model id via `lora_targets_for()`,
+**not hardcoded** — so switching to Qwen on Colab picks up `q_proj`/`k_proj`/
+`v_proj`/`o_proj` automatically. Hardcoding them is a silent failure: PEFT
+attaches to nothing and the loss barely moves.
+
+`PATHS.models` and `PATHS.data` honour `JOKE_RL_MODELS_DIR` / `JOKE_RL_DATA_DIR`,
+so Colab training writes to Drive (surviving a recycled runtime) and the local
+Gradio app can serve that same checkpoint with no code change.
+
+**Because of this, task 0b matters even less** — the tiny model is now the local
+default, so nothing here needs the 548MB GPT-2 download.
 
 ### Verified working
 - Python 3.11.9 arm64, all 11 dependencies import.
 - **MPS available**, real matmul runs on it. No CUDA locally (expected).
 - Full model path: load → tokenizer pad-token fix → **LoRA wrap on `c_attn`** →
   `generate()`. Exercised against `sshleifer/tiny-gpt2` and it passed.
+- **Save/load round trip**: built a LoRA model, `save_policy()` → `load_policy()`
+  → generated from the reloaded checkpoint. The adapter records its own base
+  model, so loading needs no extra arguments.
+- **Drive scenario**: a checkpoint in an outside directory was found and loaded
+  purely via `JOKE_RL_MODELS_DIR`, and pinned exactly via `JOKE_RL_APP_MODEL`.
+  Bad paths raise a clear error rather than silently loading the base model.
 
 ### Two things resolved that will bite again if forgotten
 
