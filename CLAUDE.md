@@ -1,5 +1,9 @@
 # CLAUDE.md — project context for future sessions
 
+> **Read [`PROGRESS.md`](PROGRESS.md) first** — it records what is done, what is
+> half-finished, and the exact next step. This file is the stable context;
+> PROGRESS.md is the moving state.
+
 ## What this is
 A university AI course project: an AI that generates creative, funny jokes in a
 **user-chosen context** (e.g. "coffee", "university exams", "programming"),
