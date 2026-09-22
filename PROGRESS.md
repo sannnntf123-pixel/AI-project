@@ -39,23 +39,53 @@ history. **Never `git add` the `.venv` again.**
 **2. The network here is very slow (~57 KB/s to the HF CDN).**
 GPT-2's `model.safetensors` is 548MB ≈ 2.7 hours. That is why `--tiny` exists.
 
-### ⚠️ Unfinished from this session
-The real **GPT-2 download was still in progress** (~12MB of 548MB) when the
-session ended, so `test_setup.py` has only been verified against the tiny
-stand-in. The tiny model shares GPT-2's architecture and tokenizer, so the code
-path is genuinely validated — but confirm with the real weights:
+### ⚠️ OPEN TASK — download the real GPT-2 weights (deferred, not blocking)
 
-```bash
-python -m src.test_setup          # full check, needs gpt2 downloaded
-python -m src.test_setup --tiny   # fast check, no large download
-```
+**Status: deliberately postponed. The network here is too slow right now.**
 
-If the download did not finish, resume it in the background and carry on with
-data work, which needs no model:
+`test_setup.py` has only been verified against `sshleifer/tiny-gpt2`. That model
+has GPT-2's real architecture and tokenizer, so the code path *is* genuinely
+validated — LoRA attaches to `c_attn`, generation runs on MPS. What is not yet
+verified is the real 548MB checkpoint.
+
+**What was measured (2026-09-22):**
+
+| Host | Sustained speed |
+|---|---|
+| HF CDN (`model.safetensors`) | **2.9 KB/s** — effectively stalled |
+| GitHub | ~217 KB/s |
+| PyPI / Fastly | ~58 KB/s |
+
+`huggingface_hub` retried three times and wrote **0 bytes** each time; a
+resumable `curl` managed 172KB in 60s. At that rate 548MB needs ~50 hours, so
+the download was stopped and the partial blob deleted (a truncated
+`.safetensors` left at the real cache path makes `transformers` fail with a
+confusing parse error rather than re-downloading).
+
+**To do it later, on a better connection:**
 
 ```bash
 python -c "from huggingface_hub import snapshot_download; snapshot_download('gpt2')"
+python -m src.test_setup        # no --tiny: confirms the real weights
 ```
+
+If the CDN throttles again, a resumable curl survives drops better than
+`huggingface_hub` does:
+
+```bash
+BLOB=~/.cache/huggingface/hub/models--gpt2/blobs/248dfc3911869ec493c76e65bf2fcf7f615828b0254c12b473182f0f81d3a707
+curl -L -C - --retry 10 -o "$BLOB" https://huggingface.co/gpt2/resolve/main/model.safetensors
+```
+(`-C -` resumes from wherever it stopped; re-run until the file reaches
+548,105,171 bytes, then symlink it as `model.safetensors` in the
+`snapshots/<hash>/` directory.)
+
+**Colab has fast internet.** The simplest path may be to skip the local
+download entirely and let the Colab notebook in stage 2 pull GPT-2 itself —
+which is where the real training happens anyway. Nothing before stage 2 needs
+the weights.
+
+**This does not block anything.** Stage 1 (data) needs no model at all.
 
 ---
 
@@ -101,6 +131,7 @@ pull in the background.
 ## Stage checklist
 
 - [x] 0 — Scaffolding, config, environment test
+- [ ] **0b — download real GPT-2 weights** (deferred: network too slow; not blocking)
 - [ ] 1 — Data: download, clean, dedupe, filter, context-tag  ← **next**
 - [ ] 2 — SFT: LoRA fine-tune (Colab notebook)
 - [ ] 3 — Reward model: humour classifier + 4 other signals
