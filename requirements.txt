@@ -1,0 +1,31 @@
+# Direct dependencies. Pinned to the majors this project was built against —
+# transformers 5.x and trl 1.x changed APIs from the 4.x/0.x era, so loosening
+# these will break training code.
+#
+# For an exact reproduction of the development environment, use
+# requirements-lock.txt instead (full `pip freeze`, including transitives).
+
+# --- core ML ---
+torch==2.14.0
+transformers==5.17.0
+datasets==5.0.1
+accelerate==1.15.0
+
+# --- parameter-efficient fine-tuning & RL ---
+peft==0.21.0
+trl==1.13.0
+
+# --- reward model components ---
+sentence-transformers==6.1.0
+
+# --- data processing & evaluation ---
+pandas==3.0.6
+scikit-learn==1.9.1
+numpy==2.4.6
+matplotlib>=3.8
+
+# --- human-feedback app ---
+gradio==6.28.0
+
+# --- notebooks ---
+jupyter==1.1.1
