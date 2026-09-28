@@ -35,7 +35,7 @@ Two things that cost time and will recur:
 - **HF's Xet backend 404s for anonymous requests.** Workaround:
   `HF_HUB_DISABLE_XET=1`. Use it for every large HF download on this machine.
 
-### ✅ Stage 1 — Data (code done, one re-run outstanding)
+### ✅ Stage 1 — Data (done)
 
 `src/data_download.py` — both corpora, from Hugging Face not Kaggle (the
 original Short Jokes needs a Kaggle token; `Fraser/short-jokes` is a loading
@@ -78,42 +78,76 @@ rows that would be ~7×10¹¹ comparisons.
 
 ---
 
-## ⚠️ OPEN TASK 1c — re-run the cleaner (START HERE)
+## ✅ Task 1c — cleaner re-run (done 2026-09-28)
 
-**`data/processed/` currently holds output from the FIRST run, which has two
-known defects.** The fixes are written, tested and committed — the corpus just
-has not been regenerated. The re-run was interrupted partway.
+`data/processed/` now reflects the fixed filters.
 
-```bash
-python -m src.data_clean          # ~15 min, mostly embedding-tagging on MPS
-```
+| Stage | Removed |
+|---|---|
+| raw | 1,231,657 |
+| dead/empty | 421,779 |
+| length | 87,981 |
+| exact duplicates | 111,026 |
+| near duplicates | 25,986 |
+| offensive | 10,845 |
+| reddit meta-posts | 5,564 |
+| **final** | **568,476 (46.2% kept)** |
 
-What the fixes address, both found by auditing the output:
+Train 540,052 / test 28,424. 442,189 rows carry upvote scores.
 
-1. **207 jokes using the British spelling of a slur** survived, because the
-   wordlist only had the American spelling. Digit-substituted variants
-   (`n1gger`, `f4ggot`) also got through. Both now covered, with regression
-   tests. **This matters for a graded university project** — check the output
-   before submitting.
-2. **4,405 reddit meta-posts** are not jokes at all (joke-request threads,
-   karma complaints, announcements). A new `is_meta_post()` filter removes them.
+Both defects verified gone — 0 occurrences of British-spelling slurs,
+digit-substituted slurs, and reddit meta-posts. 44 tests pass.
 
-Expect roughly **570,000** jokes after the re-run, slightly fewer than 574,275.
+---
 
-Verify afterwards:
-```bash
-python -c "
-import json,re
-rows=[json.loads(l) for l in open('data/processed/jokes_train.jsonl')]
-print('rows:', len(rows))
-print('paedo leaks:', sum(1 for r in rows if re.search(r'paedo', r['joke'], re.I)))
-print('meta leaks :', sum(1 for r in rows if re.search(r'joke thread|upvote', r['joke'], re.I)))
-"
-```
+## ⚠️ OPEN TASK 1d — context labels are noisy (START HERE)
+
+**This is the most important open issue, and it affects the core of the project.**
+
+Context tagging is two-pass: keyword rules cover 29.5%, and sentence-embedding
+similarity assigns the remaining 70.5%. The embedding pass is too permissive.
+
+Proxy precision — how often a joke labelled with a context actually contains one
+of that context's own keywords:
+
+| Context | Keyword-confirmed |
+|---|---|
+| coffee | **22.6%** |
+| food | 43.9% |
+| programming | 44.3% |
+| animals | 57.5% |
+| university exams | 60.8% |
+| relationships | 61.1% |
+
+Spot-checking confirms it. Sampled "coffee" jokes include a bar joke and a
+stolen-glasses joke with no coffee anywhere; "programming" includes a mosquito
+-net charity joke (the keyword rule matched "program being started") and a
+date-format pun.
+
+**Why this matters:** if the context label is noise, SFT teaches the model to
+*ignore* the context token. Then the RL relevance reward (0.25 weight) spends
+its budget fighting the SFT model instead of improving jokes — and the headline
+demo ("write me a joke about coffee") produces jokes unrelated to coffee.
+
+### Options, cheapest first
+
+1. **Raise `DATA.context_min_similarity`** from `0.25`. For normalised cosine
+   against `"a joke about X"`, 0.25 is barely above noise. Try 0.35–0.45, and
+   measure the precision table above at each value. Anything below the floor
+   becomes `general`, which is honest.
+2. **Keyword-only tagging** (`--no-embed`). High precision, but `general` grows
+   from 42% to ~70% and the small contexts shrink to a few thousand rows each.
+3. **Tighten the keyword rules.** `"program"` matching "program being started"
+   is a word-boundary problem; `"ai "` and `"git "` are similarly loose.
+4. **Accept the noise but downsample `general`** so the model at least sees
+   balanced context conditioning.
+
+Recommended: (1) + (3) together, then re-check the precision table.
 
 ---
 
 ## Two findings worth putting in the report
+
 
 **High reddit score ≠ funny.** The three highest-scoring posts in the raw dump
 are an obituary for the subreddit's founder, a net-neutrality protest, and a
@@ -176,7 +210,8 @@ After task 1c. This is the first stage that needs a GPU, so it belongs in a
 - [x] 0b — Real GPT-2 weights downloaded and verified
 - [x] 1a — Datasets downloaded (1.23M raw jokes)
 - [x] 1b — Cleaning pipeline written and tested (44 tests)
-- [ ] **1c — re-run the cleaner with the fixed filters ← START HERE**
+- [x] 1c — re-ran the cleaner with the fixed filters (568,476 jokes)
+- [ ] **1d — fix noisy context labels ← START HERE**
 - [ ] 2 — SFT: LoRA fine-tune (Colab notebook)
 - [ ] 3 — Reward model: humour classifier + 4 other signals
 - [ ] 4 — RL: GRPO with KL penalty (Colab notebook)
