@@ -185,6 +185,14 @@ def format_example(context: str, joke: str) -> str:
     return f"{format_prompt(context)}{joke.strip()}{END_TOKEN}"
 
 
+# Sources. Both are Hugging Face mirrors, deliberately: the original Short Jokes
+# lives on Kaggle and needs an API token, and Fraser/short-jokes is a loading
+# script, which datasets 5.x no longer executes.
+SHORT_JOKES_REPO = "ysharma/short_jokes"
+SHORT_JOKES_FILE = "shortjokes.csv"          # 231K one-liners, columns ID,Joke
+REDDIT_JOKES_REPO = "SocialGrep/one-million-reddit-jokes"
+
+
 @dataclass(frozen=True)
 class DataConfig:
     # Contexts the model is trained to condition on. Anything outside this list
@@ -212,14 +220,30 @@ class DataConfig:
     min_words: int = 4
     max_words: int = 60
     max_chars: int = 400
-    # Near-duplicate removal threshold (TF-IDF cosine similarity).
+    # Near-duplicate removal. We use MinHash + LSH rather than all-pairs
+    # TF-IDF cosine: at ~1.2M rows the naive comparison is ~7e11 pairs, which
+    # is not a loop anyone should write. LSH buckets candidates first and only
+    # compares within buckets, turning it into roughly linear work.
+    #
+    # Note this measures Jaccard overlap of word shingles, not TF-IDF cosine.
+    # They rank near-duplicates almost identically for short texts, and Jaccard
+    # is the one that has a scalable approximate algorithm.
     dedup_threshold: float = 0.90
+    minhash_perm: int = 128       # more permutations = more accurate, slower
+    shingle_size: int = 3         # word n-grams used as the set elements
     # Minimum reddit score for an r/Jokes row to count as "funny" when
     # building the humour classifier's positive class.
     reddit_min_score: int = 100
     # Fraction of the cleaned corpus held out for evaluation.
     test_size: float = 0.05
     seed: int = 42
+
+    # Context tagging. Keyword rules run first (fast, transparent); anything
+    # still untagged is optionally assigned by embedding similarity against the
+    # context labels. Below this cosine similarity we give up and use
+    # "general" rather than forcing a bad label.
+    context_min_similarity: float = 0.25
+    embed_batch_size: int = 256
 
 
 DATA = DataConfig()

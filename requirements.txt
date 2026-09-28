@@ -19,6 +19,7 @@ trl==1.13.0
 sentence-transformers==6.1.0
 
 # --- data processing & evaluation ---
+datasketch==2.0.0          # MinHash LSH for scalable near-duplicate removal
 pandas==3.0.6
 scikit-learn==1.9.1
 numpy==2.4.6
@@ -26,6 +27,9 @@ matplotlib>=3.8
 
 # --- human-feedback app ---
 gradio==6.28.0
+
+# --- tests ---
+pytest>=8.0
 
 # --- notebooks ---
 jupyter==1.1.1
