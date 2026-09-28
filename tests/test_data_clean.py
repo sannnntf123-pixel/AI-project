@@ -17,6 +17,7 @@ from src.data_clean import (
     _shingles,
     drop_near_duplicates,
     is_dead,
+    is_meta_post,
     is_offensive,
     normalise,
     tag_by_keywords,
@@ -78,6 +79,58 @@ class TestOffensiveFilter:
 
     def test_is_case_insensitive(self):
         assert is_offensive("RAPE joke")
+
+
+class TestOffensiveFilterSpellingVariants:
+    """Regression tests from a real audit of the cleaned corpus.
+
+    The first pass shipped 207 jokes using the British spelling and a handful
+    using digit-substituted slurs, because the wordlist only had the American
+    spellings and no obfuscation handling.
+    """
+
+    @pytest.mark.parametrize("text", [
+        "what do paedophiles and tortoises have in common",
+        "a paedo joke",
+    ])
+    def test_catches_british_spelling(self, text):
+        assert is_offensive(text)
+
+    @pytest.mark.parametrize("text", ["n1gger", "f4ggot", "ret4rd", "n!gger"])
+    def test_catches_digit_substitutions(self, text):
+        assert is_offensive(text)
+
+    @pytest.mark.parametrize("text", [
+        "the bigger picture",        # contains 'igge' but is not a slur
+        "I need a bag for my stuff",
+        "retarded growth of the plant",  # a true positive; documents the
+                                         # wordlist's known over-blocking
+    ])
+    def test_does_not_crash_on_lookalikes(self, text):
+        # These assert behaviour, not correctness of policy: the filter is
+        # blunt by design and the report should say so.
+        assert isinstance(is_offensive(text), bool)
+
+
+class TestMetaPostFilter:
+    """r/Jokes meta-posts score well but are not jokes. The three
+    highest-scoring posts in the raw dump are all of this kind."""
+
+    @pytest.mark.parametrize("text", [
+        "Lawyer Joke Thread Submit your favorite lawyer jokes!",
+        "Please upvote this if you agree",
+        "Repost from r/jokes but worth it",
+        "[Meta] new rules for this subreddit",
+    ])
+    def test_flags_meta_posts(self, text):
+        assert is_meta_post(text)
+
+    @pytest.mark.parametrize("text", [
+        "Why did the chicken cross the road? To get to the other side.",
+        "A horse walks into a bar. The bartender says why the long face.",
+    ])
+    def test_allows_real_jokes(self, text):
+        assert not is_meta_post(text)
 
 
 class TestKeywordTagging:

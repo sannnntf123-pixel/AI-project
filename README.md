@@ -48,10 +48,50 @@ off into text that games the reward without being a joke.
 ```
 
 ### 1. Data
-Short Jokes and r/Jokes are merged, stripped of duplicates and near-duplicates
-(TF-IDF cosine > 0.90), filtered for offensive content, and each joke is tagged
-with one of 15 context labels. r/Jokes upvote scores double as the supervision
-signal for the humour classifier in stage 3.
+
+Both corpora come from Hugging Face, not Kaggle — the original Short Jokes needs
+a Kaggle API token, and `Fraser/short-jokes` is a loading script, which
+`datasets` 5.x no longer executes.
+
+| Source | Rows | Scores |
+|---|---|---|
+| `ysharma/short_jokes` | 231,657 | no |
+| `SocialGrep/one-million-reddit-jokes` | 1,000,000 | **yes** |
+
+The upvote scores are the point of the reddit set: they are the only human
+signal of what is actually funny, and they become the labels for the humour
+classifier in stage 3. Reddit splits a joke across two fields — `title` is the
+setup, `selftext` the punchline — so they are joined before anything else.
+
+Cleaning runs cheapest-filter-first:
+
+```
+normalise → drop tombstones → length → exact dedup → near-dedup
+  → offensive → meta-posts → context tagging → split
+```
+
+**Near-duplicate removal uses MinHash + LSH**, not all-pairs TF-IDF cosine. At
+1.2M rows the naive comparison is ~7×10¹¹ pairs. MinHash compresses each joke's
+word-3-shingle set into a signature whose collision probability equals the
+Jaccard similarity; LSH buckets signatures so only plausible matches are ever
+compared. Rows are sorted by score first, so the highest-scoring copy of a
+repeated joke is the one kept.
+
+**Context tagging is two-pass**: keyword rules first (fast, deterministic, easy
+to justify — about 29% coverage), then zero-shot sentence-embedding similarity
+against `"a joke about X"` for the rest, falling back to `general` below a
+similarity floor rather than forcing a bad label.
+
+Two findings from auditing the output, both worth reporting:
+
+- **High reddit score does not mean funny.** The three highest-scoring posts in
+  the raw dump are an obituary, a net-neutrality protest, and a
+  broken-keyboard bit. r/Jokes upvotes community drama as readily as jokes, so
+  a meta-post filter runs before the score is ever used as a humour label.
+- **A wordlist filter misses what it was not told about.** The first pass let
+  through 207 jokes using the British spelling of a slur the list only had in
+  American form, plus digit-substituted variants written specifically to evade
+  filters. Both are now covered, with regression tests.
 
 ### 2. Supervised fine-tuning
 LoRA adapters on a small pretrained model — `gpt2` (124M) by default, so it

@@ -99,8 +99,11 @@ _SLURS = [
 ]
 
 _SENSITIVE_TOPICS = [
-    # Sexual content involving minors -- zero tolerance, no context saves these
-    "pedophile", "pedo ", "child porn", "underage sex", "molest",
+    # Sexual content involving minors -- zero tolerance, no context saves these.
+    # Both spellings: the corpus is heavily British/Australian and the first
+    # pass missed 207 jokes by only listing the American one.
+    "pedophile", "paedophile", "pedo ", "paedo ", "pedos", "paedos",
+    "child porn", "underage sex", "molest",
     # Sexual violence
     "rape", "raping", "rapist",
     # Self-harm and extreme violence played for laughs
@@ -114,9 +117,41 @@ _OFFENSIVE = re.compile(
     re.I,
 )
 
+# Obfuscated spellings that a plain wordlist misses. People write slurs with
+# digit substitutions and padding characters specifically to evade filters, and
+# a first pass over the corpus found exactly that.
+_OBFUSCATED = re.compile(
+    r"\b(n[i1!|][gq]{2,}[e3a@]?r?"      # n-word with digit substitutions
+    r"|f[a@4][gq]{1,2}(?:[o0]t)?s?"      # f-slur variants
+    r"|r[e3]t[a@4]rd)",
+    re.I,
+)
+
 
 def is_offensive(text: str) -> bool:
-    return bool(_OFFENSIVE.search(text))
+    return bool(_OFFENSIVE.search(text) or _OBFUSCATED.search(text))
+
+
+# --------------------------------------------------------------------------
+# Reddit meta-posts
+# --------------------------------------------------------------------------
+# r/Jokes contains a lot of posts that are not jokes: announcements, requests
+# for jokes, karma complaints, contest threads. They score well (people upvote
+# community drama), so a naive "high score = funny" assumption pulls them
+# straight into the training set. The three highest-scoring posts in the raw
+# dump are all of this kind -- an obituary, a net-neutrality protest, and a
+# broken-keyboard bit -- which is a result worth stating in the report.
+
+_META = re.compile(
+    r"(joke thread|submit your|upvote|downvote|r/jokes|/r/|repost"
+    r"|this sub(reddit)?\b|karma\b|front page|tl;dr|\[meta\]|announcement"
+    r"|contest|winner|rule \d)",
+    re.I,
+)
+
+
+def is_meta_post(text: str) -> bool:
+    return bool(_META.search(text))
 
 
 # --------------------------------------------------------------------------
@@ -328,6 +363,13 @@ def clean(df: pd.DataFrame, use_embeddings: bool) -> tuple[pd.DataFrame, dict]:
     print(f"    removed {stats['dropped_offensive']:,} "
           f"({100*stats['dropped_offensive']/max(before,1):.2f}% of remaining)")
 
+    print("[6b] reddit meta-post filter")
+    before = len(df)
+    meta_mask = df["text"].map(is_meta_post)
+    stats["dropped_meta"] = int(meta_mask.sum())
+    df = df[~meta_mask]
+    print(f"    removed {stats['dropped_meta']:,} non-joke posts")
+
     print("[7] context tagging")
     df = df.reset_index(drop=True)
     df["context"] = tag_by_keywords(df["text"])
@@ -404,7 +446,7 @@ def main() -> int:
     print("\n" + "=" * 62)
     print(f"{'raw':<26} {stats['raw']:>10,}")
     for k in ("dropped_dead_or_empty", "dropped_length", "dropped_exact_dup",
-              "dropped_near_dup", "dropped_offensive"):
+              "dropped_near_dup", "dropped_offensive", "dropped_meta"):
         print(f"{'  - ' + k[8:]:<26} {stats[k]:>10,}")
     print(f"{'final':<26} {stats['final']:>10,}  "
           f"({100*stats['final']/stats['raw']:.1f}% kept)")
